@@ -1,0 +1,227 @@
+version: "3.8"
+
+services:
+
+  ###########################################################################
+  # 1. PostgreSQL: creates n8n_db automatically, runs initdb/SQL if needed
+  ###########################################################################
+  postgres:
+    image: postgres:15
+    container_name: ubuntu-postgres
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_DB=${N8N_DB_NAME} # Creates n8n_db by default
+      - POSTGRES_USER=${POSTGRES_USER}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d  # Run SQL scripts on first init
+    networks:
+      - app-network
+
+  ###########################################################################
+  # 2. n8n: Workflow automation, connected to n8n_db in Postgres
+  ###########################################################################
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: ubuntu-n8n
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${N8N_DB_NAME}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+      - N8N_HOST=n8n.offsecbg.lat
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_PATH=/
+    volumes:
+      - ./n8n_data:/home/node/.n8n # Must be owned by UID 1000:1000
+    depends_on:
+      - postgres
+    networks:
+      - app-network
+
+  ###########################################################################
+  # 3. Budibase Services: Complete no-code platform stack
+  ###########################################################################
+  
+  # Budibase App Service - Main application interface
+  budibase-app:
+    image: budibase/apps:latest
+    container_name: ubuntu-budibase-app
+    restart: unless-stopped
+    environment:
+      SELF_HOSTED: 1
+      COUCH_DB_URL: http://${COUCH_DB_USER}:${COUCH_DB_PASSWORD}@budibase-couchdb:5984
+      WORKER_URL: http://budibase-worker:4003
+      MINIO_URL: http://budibase-minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      BUDIBASE_ENVIRONMENT: ${BUDIBASE_ENVIRONMENT:-PRODUCTION}
+      PORT: 4002
+      API_ENCRYPTION_KEY: ${API_ENCRYPTION_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      LOG_LEVEL: info
+      ENABLE_ANALYTICS: "true"
+      REDIS_URL: budibase-redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      BB_ADMIN_USER_EMAIL: ${BB_ADMIN_USER_EMAIL}
+      BB_ADMIN_USER_PASSWORD: ${BB_ADMIN_USER_PASSWORD}
+      PLUGINS_DIR: ${PLUGINS_DIR}
+      OFFLINE_MODE: ${OFFLINE_MODE:-}
+    depends_on:
+      - budibase-worker
+      - budibase-redis
+      - budibase-couchdb
+    networks:
+      - app-network
+    volumes:
+      - ./budibase_plugins:/plugins
+
+  # Budibase Worker Service - Background task processing
+  budibase-worker:
+    image: budibase/worker:latest
+    container_name: ubuntu-budibase-worker
+    restart: unless-stopped
+    environment:
+      SELF_HOSTED: 1
+      PORT: 4003
+      CLUSTER_PORT: ${MAIN_PORT:-10000}
+      API_ENCRYPTION_KEY: ${API_ENCRYPTION_KEY}
+      JWT_SECRET: ${JWT_SECRET}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_URL: http://budibase-minio:9000
+      APPS_URL: http://budibase-app:4002
+      COUCH_DB_USERNAME: ${COUCH_DB_USER}
+      COUCH_DB_PASSWORD: ${COUCH_DB_PASSWORD}
+      COUCH_DB_URL: http://${COUCH_DB_USER}:${COUCH_DB_PASSWORD}@budibase-couchdb:5984
+      INTERNAL_API_KEY: ${INTERNAL_API_KEY}
+      REDIS_URL: budibase-redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      BB_ADMIN_USER_EMAIL: ${BB_ADMIN_USER_EMAIL}
+      BB_ADMIN_USER_PASSWORD: ${BB_ADMIN_USER_PASSWORD}
+      OFFLINE_MODE: ${OFFLINE_MODE:-}
+    depends_on:
+      - budibase-redis
+      - budibase-couchdb
+      - budibase-minio
+    networks:
+      - app-network
+
+  # Budibase Proxy - Internal routing (doesn't conflict with Caddy)
+  budibase-proxy:
+    image: budibase/proxy:latest
+    container_name: ubuntu-budibase-proxy
+    restart: unless-stopped
+    environment:
+      PROXY_RATE_LIMIT_WEBHOOKS_PER_SECOND: 10
+      PROXY_RATE_LIMIT_API_PER_SECOND: 20
+      APPS_UPSTREAM_URL: http://budibase-app:4002
+      WORKER_UPSTREAM_URL: http://budibase-worker:4003
+      MINIO_UPSTREAM_URL: http://budibase-minio:9000
+      COUCHDB_UPSTREAM_URL: http://budibase-couchdb:5984
+      WATCHTOWER_UPSTREAM_URL: http://budibase-watchtower:8080
+      RESOLVER: 127.0.0.11
+    depends_on:
+      - budibase-app
+      - budibase-worker
+    networks:
+      - app-network
+
+  # CouchDB - Budibase's primary database
+  budibase-couchdb:
+    image: budibase/couchdb:latest
+    container_name: ubuntu-budibase-couchdb
+    restart: unless-stopped
+    environment:
+      - COUCHDB_PASSWORD=${COUCH_DB_PASSWORD}
+      - COUCHDB_USER=${COUCH_DB_USER}
+      - TARGETBUILD=docker-compose
+    volumes:
+      - budibase_couchdb_data:/opt/couchdb/data
+    networks:
+      - app-network
+
+  # MinIO - Object storage for files and attachments
+  budibase-minio:
+    image: minio/minio:latest
+    container_name: ubuntu-budibase-minio
+    restart: unless-stopped
+    volumes:
+      - budibase_minio_data:/data
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+      MINIO_BROWSER: "on"
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    networks:
+      - app-network
+
+  # Redis - Caching and session management
+  budibase-redis:
+    image: redis:7-alpine
+    container_name: ubuntu-budibase-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - budibase_redis_data:/data
+    networks:
+      - app-network
+
+  # Watchtower - Container auto-updates (optional)
+  budibase-watchtower:
+    image: containrrr/watchtower:latest
+    container_name: ubuntu-budibase-watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WATCHTOWER_HTTP_API: "true"
+      WATCHTOWER_HTTP_API_TOKEN: ${WATCHTOWER_TOKEN}
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_INCLUDE_STOPPED: "true"
+      WATCHTOWER_REVIVE_STOPPED: "false"
+    command: --interval 86400 # Check daily
+    networks:
+      - app-network
+
+  ###########################################################################
+  # 4. Caddy: Reverse proxy with automatic HTTPS for all subdomains
+  ###########################################################################
+  caddy:
+    image: caddy:2
+    container_name: ubuntu-caddy
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile # Caddy configuration
+      - ./caddy_data:/data # Caddy's auto-TLS storage
+      - caddy_config:/config # Caddy's config (JSON) storage
+    networks:
+      - app-network
+
+volumes:
+  caddy_config: {}    # Named volume for Caddy's JSON config
+  budibase_couchdb_data: {}  # CouchDB data persistence
+  budibase_minio_data: {}    # MinIO object storage
+  budibase_redis_data: {}    # Redis cache data
+
+networks:
+  app-network:
+    driver: bridge
