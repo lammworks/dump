@@ -78,9 +78,12 @@ services:
       PLUGINS_DIR: ${PLUGINS_DIR}
       OFFLINE_MODE: ${OFFLINE_MODE:-}
     depends_on:
-      - budibase-worker
-      - budibase-redis
-      - budibase-couchdb
+      budibase-couchdb:
+        condition: service_healthy
+      budibase-worker:
+        condition: service_started
+      budibase-redis:
+        condition: service_started
     networks:
       - app-network
     volumes:
@@ -111,9 +114,12 @@ services:
       BB_ADMIN_USER_PASSWORD: ${BB_ADMIN_USER_PASSWORD}
       OFFLINE_MODE: ${OFFLINE_MODE:-}
     depends_on:
-      - budibase-redis
-      - budibase-couchdb
-      - budibase-minio
+      budibase-couchdb:
+        condition: service_healthy
+      budibase-redis:
+        condition: service_started
+      budibase-minio:
+        condition: service_healthy
     networks:
       - app-network
 
@@ -139,17 +145,25 @@ services:
 
   # CouchDB - Budibase's primary database
   budibase-couchdb:
-    image: budibase/couchdb:latest
+    image: budibase/couchdb:v3.3.3-sqs-v2.1.1
     container_name: ubuntu-budibase-couchdb
     restart: unless-stopped
     environment:
-      - COUCHDB_PASSWORD=${COUCH_DB_PASSWORD}
+      # CouchDB requires these specific environment variable names
       - COUCHDB_USER=${COUCH_DB_USER}
+      - COUCHDB_PASSWORD=${COUCH_DB_PASSWORD}
       - TARGETBUILD=docker-compose
     volumes:
       - budibase_couchdb_data:/opt/couchdb/data
     networks:
       - app-network
+    # Add health check to ensure CouchDB is ready before other services start
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5984/_up"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   # MinIO - Object storage for files and attachments
   budibase-minio:
